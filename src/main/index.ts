@@ -2,32 +2,61 @@
  * Truly - Main Process
  * With hide-from-capture and smart AI prompts
  */
-import { app, BrowserWindow, globalShortcut, ipcMain, Tray, Menu, nativeImage, screen, desktopCapturer } from 'electron';
+import { app, BrowserWindow, globalShortcut, ipcMain, Tray, Menu, nativeImage, screen, desktopCapturer, Notification } from 'electron';
+import Store from 'electron-store';
 
 declare const OVERLAY_WINDOW_WEBPACK_ENTRY: string;
 declare const OVERLAY_WINDOW_PRELOAD_WEBPACK_ENTRY: string;
 
+// Persistent storage
+const store = new Store({
+    defaults: {
+        geminiApiKey: '',
+        position: { x: -1, y: -1 },
+        size: { width: 420, height: 480 },
+    }
+});
+
 const settings = {
-    geminiApiKey: '',
-    position: { x: -1, y: -1 },
-    size: { width: 420, height: 480 },
+    geminiApiKey: store.get('geminiApiKey') as string,
+    position: store.get('position') as { x: number; y: number },
+    size: store.get('size') as { width: number; height: number },
 };
 
 let overlayWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let isVisible = false;
+let analysisNotification: Notification | null = null;
+let isClickThrough = true; // Start in click-through mode
 
-// Smart system prompt for auto-deducing what user needs help with
-const SYSTEM_PROMPT = `You are an intelligent screen assistant. Analyze the screenshot and determine what the user likely needs help with.
+// Smart system prompt for direct, actionable answers
+const SYSTEM_PROMPT = `You are a direct and efficient screen assistant. Analyze screenshots and provide immediate, actionable answers.
 
-Guidelines:
-- If it's a quiz/test question: Identify the question and provide the correct answer with brief explanation
-- If it's code with an error: Explain the error and how to fix it  
-- If it's a form or application: Explain what needs to be filled in
-- If it's a document: Summarize key points or answer implied questions
-- If it's a chat/email: Suggest appropriate responses
+Critical Rules:
+- NEVER describe what you see on screen - the user can already see it
+- Give ONLY the answer, not observations or descriptions
+- For questions/quizzes: Identify and answer ALL questions shown
+- For multiple questions: Answer each one separately, numbered
+- Be extremely concise - 1-3 sentences per answer maximum
+- Answer first, explain second (if needed)
 
-Be concise and directly helpful. Start with the most important information.`;
+Format for multiple questions:
+1. [Answer to Q1]. [Brief reason if helpful]
+2. [Answer to Q2]. [Brief reason if helpful]
+
+Example responses:
+❌ "I can see a quiz with 3 questions about biology. Question 1 asks about..."
+✅ "1. C) Chloroplasts - they contain chlorophyll
+2. B) Mitochondria - produces ATP
+3. A) Ribosomes - protein synthesis"
+
+❌ "Looking at your screen, there appears to be a Python error on line 12..."
+✅ "Add colon after line 12's if statement. Python requires ':' for code blocks."
+
+❌ "This screen shows a coding problem with multiple questions..."
+✅ "1. O(n log n) - uses merge sort
+2. Space: O(n) - temporary array needed
+3. Yes, stable - preserves order"`;
 
 function createWindow() {
     const display = screen.getPrimaryDisplay();
@@ -59,16 +88,35 @@ function createWindow() {
 
     overlayWindow.loadURL(OVERLAY_WINDOW_WEBPACK_ENTRY);
 
+    // Set click-through after window loads, based on whether API key exists
+    overlayWindow.webContents.on('did-finish-load', () => {
+        if (!overlayWindow) return;
+
+        // If no API key, disable click-through so user can enter it
+        if (!settings.geminiApiKey) {
+            isClickThrough = false;
+            overlayWindow.setIgnoreMouseEvents(false);
+            overlayWindow.webContents.send('click-through-changed', false);
+        } else {
+            // If API key exists, enable click-through
+            isClickThrough = true;
+            overlayWindow.setIgnoreMouseEvents(true, { forward: true });
+            overlayWindow.webContents.send('click-through-changed', true);
+        }
+    });
+
     overlayWindow.on('moved', () => {
         if (!overlayWindow) return;
         const [px, py] = overlayWindow.getPosition();
         settings.position = { x: px, y: py };
+        store.set('position', settings.position); // Persist
     });
 
     overlayWindow.on('resized', () => {
         if (!overlayWindow) return;
         const [w, h] = overlayWindow.getSize();
         settings.size = { width: w, height: h };
+        store.set('size', settings.size); // Persist
     });
 }
 
@@ -116,6 +164,8 @@ function setupTray() {
     tray.setToolTip('Truly AI');
     tray.setContextMenu(Menu.buildFromTemplate([
         { label: 'Show/Hide (Ctrl+Shift+Space)', click: toggle },
+        { label: 'Quick Analyze (Ctrl+Shift+Q)', click: () => overlayWindow?.webContents.send('trigger-capture') },
+        { label: 'Toggle Click-Through (Ctrl+Shift+X)', click: toggleClickThrough },
         { type: 'separator' },
         { label: 'Settings', click: () => overlayWindow?.webContents.send('open-settings') },
         { type: 'separator' },
@@ -128,18 +178,20 @@ function setupIPC() {
     ipcMain.handle('get-api-key', () => settings.geminiApiKey);
     ipcMain.handle('set-api-key', (_, key: string) => {
         settings.geminiApiKey = key;
+        store.set('geminiApiKey', key); // Persist to disk
+
+        // Enable click-through automatically after setting API key
+        if (overlayWindow && key) {
+            isClickThrough = true;
+            overlayWindow.setIgnoreMouseEvents(true, { forward: true });
+            overlayWindow.webContents.send('click-through-changed', true);
+        }
+
         return true;
     });
 
-    // Screen capture - temporarily hide overlay while capturing
+    // Screen capture - no need to hide since WDA_EXCLUDEFROMCAPTURE handles it
     ipcMain.handle('capture-screen', async () => {
-        // Hide the overlay before capture
-        const wasVisible = isVisible;
-        if (wasVisible && overlayWindow) {
-            overlayWindow.hide();
-            await new Promise(r => setTimeout(r, 100)); // Wait for hide
-        }
-
         try {
             const sources = await desktopCapturer.getSources({
                 types: ['screen'],
@@ -150,24 +202,18 @@ function setupIPC() {
 
             const screenshot = sources[0].thumbnail.toJPEG(85);
             return screenshot.toString('base64');
-        } finally {
-            // Restore overlay visibility
-            if (wasVisible && overlayWindow) {
-                overlayWindow.show();
-            }
+        } catch (error) {
+            console.error('Screen capture failed:', error);
+            throw error;
         }
     });
 
-    // Gemini with smart prompting
+    // Gemini with smart prompting - using Gemini 3.0 with 2.0 fallback
     ipcMain.handle('ask-gemini', async (_, userQuestion: string, screenshotBase64?: string) => {
         if (!settings.geminiApiKey) throw new Error('No API key configured');
 
         const { GoogleGenerativeAI } = require('@google/generative-ai');
         const genAI = new GoogleGenerativeAI(settings.geminiApiKey);
-        const model = genAI.getGenerativeModel({
-            model: 'gemini-2.0-flash',
-            systemInstruction: SYSTEM_PROMPT,
-        });
 
         // Build prompt - auto-deduce if no question provided
         const prompt = userQuestion?.trim() || 'Analyze this screen and help me with what I\'m looking at.';
@@ -178,19 +224,92 @@ function setupIPC() {
         }
         parts.push(prompt);
 
-        const result = await model.generateContent(parts);
-        return result.response.text();
+        // Try Gemini 3 Flash Preview first (best quality, has rate limits)
+        try {
+            const model3 = genAI.getGenerativeModel({
+                model: 'gemini-3-flash-preview',
+                systemInstruction: SYSTEM_PROMPT,
+            });
+            const result = await model3.generateContent(parts);
+            console.log('✓ Used Gemini 3 Flash Preview');
+            return result.response.text();
+        } catch (error: any) {
+            console.warn('⚠ Gemini 3 failed, falling back to 2.5:', error.message);
+
+            // Fallback to Gemini 2.5 Flash
+            try {
+                const model25 = genAI.getGenerativeModel({
+                    model: 'gemini-2.5-flash',
+                    systemInstruction: SYSTEM_PROMPT,
+                });
+                const result = await model25.generateContent(parts);
+                console.log('✓ Used Gemini 2.5 Flash (fallback)');
+                return result.response.text();
+            } catch (fallbackError: any) {
+                throw new Error(`Both models failed. Last error: ${fallbackError.message}`);
+            }
+        }
     });
 
     ipcMain.on('hide-overlay', () => { if (isVisible) toggle(); });
+
+    // Toggle click-through mode
+    ipcMain.on('set-ignore-mouse-events', (_, ignore: boolean) => {
+        if (overlayWindow) {
+            overlayWindow.setIgnoreMouseEvents(ignore, { forward: true });
+        }
+    });
+
+    // Listen for analysis completion to close notification
+    ipcMain.on('analysis-complete', () => {
+        if (analysisNotification) {
+            analysisNotification.close();
+            analysisNotification = null;
+        }
+
+        // Show completion notification if window is hidden
+        if (!isVisible) {
+            const completeNotif = new Notification({
+                title: 'Truly',
+                body: 'Analysis complete! Press Ctrl+Shift+Space to view',
+                silent: true
+            });
+            completeNotif.show();
+        }
+    });
+}
+
+function toggleClickThrough() {
+    if (!overlayWindow) return;
+    isClickThrough = !isClickThrough;
+    overlayWindow.setIgnoreMouseEvents(isClickThrough, { forward: true });
+
+    // Notify renderer about the state change
+    overlayWindow.webContents.send('click-through-changed', isClickThrough);
+
+    console.log(`Click-through: ${isClickThrough ? 'ENABLED (transparent)' : 'DISABLED (interactive)'}`);
 }
 
 function setupShortcuts() {
     globalShortcut.register('CommandOrControl+Shift+Space', toggle);
-    globalShortcut.register('CommandOrControl+Shift+C', async () => {
-        // Trigger capture even if hidden
+
+    // Toggle click-through mode with Ctrl+Shift+X
+    globalShortcut.register('CommandOrControl+Shift+X', toggleClickThrough);
+
+    globalShortcut.register('CommandOrControl+Shift+Q', async () => {
+        // Quick analyze: Trigger capture and auto-analyze silently
         overlayWindow?.webContents.send('trigger-capture');
-        if (!isVisible) toggle();
+
+        // Show subtle notification if window is hidden
+        if (!isVisible) {
+            analysisNotification = new Notification({
+                title: 'Truly',
+                body: 'Analyzing screen...',
+                silent: true,
+                timeoutType: 'never'
+            });
+            analysisNotification.show();
+        }
     });
 }
 

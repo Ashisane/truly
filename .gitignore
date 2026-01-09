@@ -30,3 +30,13 @@ npm-debug.log*
 # Native addons
 build/
 *.node
+
+# Misc
+.cache/
+.next/
+.nuxt/
+IMPLEMENTATION.md
+PRD.md
+node_modules/
+out/
+.webpack/

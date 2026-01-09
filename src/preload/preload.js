@@ -17,11 +17,20 @@ contextBridge.exposeInMainWorld('truly', {
     hideOverlay: function () {
         ipcRenderer.send('hide-overlay');
     },
+    notifyAnalysisComplete: function () {
+        ipcRenderer.send('analysis-complete');
+    },
+    setIgnoreMouseEvents: function (ignore) {
+        ipcRenderer.send('set-ignore-mouse-events', ignore);
+    },
     onTriggerCapture: function (callback) {
         ipcRenderer.on('trigger-capture', callback);
     },
     onOpenSettings: function (callback) {
         ipcRenderer.on('open-settings', callback);
+    },
+    onClickThroughChanged: function (callback) {
+        ipcRenderer.on('click-through-changed', callback);
     },
     removeAllListeners: function (channel) {
         ipcRenderer.removeAllListeners(channel);

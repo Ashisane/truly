@@ -1,19 +1,22 @@
 {
   "name": "truly",
-  "version": "0.1.0",
-  "description": "AI-powered screen overlay assistant for Windows",
+  "version": "1.0.0",
+  "description": "AI-powered screen overlay assistant for Windows - Parakeet clone using Gemini",
   "main": ".webpack/main",
   "scripts": {
     "start": "electron-forge start",
     "dev": "electron-forge start",
     "package": "electron-forge package",
-    "make": "electron-forge make"
+    "make": "electron-forge make",
+    "build": "electron-forge make"
   },
   "keywords": [
     "ai",
     "overlay",
     "gemini",
-    "assistant"
+    "assistant",
+    "parakeet",
+    "screen-capture"
   ],
   "author": "Truly",
   "license": "MIT",
@@ -39,6 +42,7 @@
   },
   "dependencies": {
     "@google/generative-ai": "^0.21.0",
+    "electron-store": "^11.0.2",
     "koffi": "^2.15.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
